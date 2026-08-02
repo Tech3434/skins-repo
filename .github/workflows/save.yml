@@ -99,9 +99,11 @@ jobs:
         run: |
           USER="${{ inputs.username }}"
           # Резервная копия конфига редактора (модом не используется — только справка/восстановление)
+          # [!] Строки heredoc'а ОБЯЗАТЕЛЬНО с отступом (уровень блока run: |):
+          #     строка в колонке 0 обрывает YAML-блок → GitHub не видит workflow_dispatch (2 авг 2026)
           cat > "${USER}.config.json" <<'JSONEOF'
-${{ inputs.config }}
-JSONEOF
+          ${{ inputs.config }}
+          JSONEOF
 
       - name: Commit and push
         env:
