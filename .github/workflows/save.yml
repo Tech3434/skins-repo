@@ -1,0 +1,130 @@
+# save.yml — «звонок»: принимает workflow_dispatch и коммитит скин в репо
+# См. context.md: разделы 4.5, 4.8, Фаза 1.
+#
+# Входные данные (workflow_dispatch):
+#   username — ник игрока Minecraft (regex ^[A-Za-z0-9_]{3,16}$)
+#   skin     — base64 PNG 64x64 (до ~65 000 символов)
+#   config   — опционально, JSON-конфиг скина с сайта (строка)
+#
+# Безопасность: коммит делает GITHUB_TOKEN (права contents: write),
+# токен-«звонок» посетителя умеет только триггерить этот воркфлоу.
+
+name: Save skin
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Ник игрока (Minecraft)'
+        required: true
+      skin:
+        description: 'Base64 PNG 64x64'
+        required: true
+      config:
+        description: 'JSON-конфиг (опционально)'
+        required: false
+
+permissions:
+  contents: write
+
+# Сериализуем раны по нику: одновременные сохранения одного игрока — в очередь
+concurrency:
+  group: save-${{ inputs.username }}
+  cancel-in-progress: false
+
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate username
+        run: |
+          USERNAME="${{ inputs.username }}"
+          if ! [[ "$USERNAME" =~ ^[A-Za-z0-9_]{3,16}$ ]]; then
+            echo "::error::Невалидный ник: $USERNAME (3-16 символов: латиница, цифры, _)"
+            exit 1
+          fi
+          # Резерв имён служебных файлов репо (см. context.md 4.8)
+          case "$USERNAME" in
+            extralist|readme|github|textures|mcskingen|mcskingen-extralist)
+              echo "::error::Ник зарезервирован: $USERNAME"
+              exit 1 ;;
+          esac
+
+      - name: Validate skin size
+        env:
+          SKIN_B64: ${{ inputs.skin }}
+        run: |
+          if [ -z "$SKIN_B64" ]; then
+            echo "::error::Пустой скин"
+            exit 1
+          fi
+          if [ "${#SKIN_B64}" -gt 65000 ]; then
+            echo "::error::Скин слишком большой: ${#SKIN_B64} символов (лимит ~65000)"
+            exit 1
+          fi
+
+      - name: Write skin files
+        run: |
+          set -e
+          mkdir -p textures
+          # Декодируем PNG и считаем SHA-256 (имя текстуры = хэш)
+          echo "${{ inputs.skin }}" | base64 -d > /tmp/skin.png
+          ID=$(sha256sum /tmp/skin.png | awk '{print $1}')
+          SHA_PNG="${ID}.png"
+          # Проверяем, что это валидный PNG 64x64
+          python3 - <<'PY'
+          import struct
+          with open('/tmp/skin.png', 'rb') as f:
+              d = f.read(33)
+          assert d[:8] == b'\x89PNG\r\n\x1a\n', 'Not a PNG'
+          w, h = struct.unpack('>II', d[16:24])
+          assert (w, h) == (64, 64), 'Size is %dx%d, expected 64x64' % (w, h)
+          PY
+          # Текстура — только если её ещё нет в репо
+          if [ ! -f "textures/${SHA_PNG}" ]; then
+            cp /tmp/skin.png "textures/${SHA_PNG}"
+          fi
+          # Профиль: dual-file по регистру (см. context.md 4.8)
+          USER="${{ inputs.username }}"
+          printf '{"username":"%s","textures":{"default":"%s"}}\n' "$USER" "$SHA_PNG" > "/tmp/${USER}.json"
+          cp "/tmp/${USER}.json" "${USER}.json"
+          cp "/tmp/${USER}.json" "$(printf '%s' "$USER" | tr 'A-Z' 'a-z').json"
+          # Сохраняем имя текстуры для шага purge
+          echo "${SHA_PNG}" > /tmp/sha.txt
+
+      - name: Write config sidecar (optional)
+        if: ${{ inputs.config != '' }}
+        run: |
+          USER="${{ inputs.username }}"
+          # Резервная копия конфига редактора (модом не используется — только справка/восстановление)
+          cat > "${USER}.config.json" <<'JSONEOF'
+${{ inputs.config }}
+JSONEOF
+
+      - name: Commit and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Изменений нет — скин уже актуален"
+            exit 0
+          fi
+          git commit -m "Save skin for ${{ inputs.username }}"
+          git push origin main
+
+      - name: Purge jsDelivr cache
+        if: always()
+        run: |
+          # Сброс кэша CDN для обновлённых файлов (см. context.md 4.4/4.8)
+          SHA_PNG="$(cat /tmp/sha.txt 2>/dev/null || true)"
+          LOWERCASE_USER="$(printf '%s' '${{ inputs.username }}' | tr 'A-Z' 'a-z')"
+          curl -s -X POST https://purge.jsdelivr.net/ \
+            -H "Content-Type: application/json" \
+            -d "{\"urls\":[\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/${{ inputs.username }}.json\",\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/${LOWERCASE_USER}.json\",\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/textures/${SHA_PNG}\"]}" \
+            || echo "Purge не удался (не критично)"
