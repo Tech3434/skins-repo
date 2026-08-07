@@ -54,6 +54,10 @@ jobs:
           fi
 
       - name: Write skin files
+        env:
+          # Конфиг передаём через env, а не через ${{ }} внутри команд:
+          # сырая подстановка JSON в bash-строки ломает квотинг/словосплиттинг.
+          SKIN_CONFIG: ${{ inputs.config }}
         run: |
           set -e
           mkdir -p textures
@@ -76,7 +80,25 @@ jobs:
           fi
 
           USER="${{ inputs.username }}"
-          printf '{"username":"%s","textures":{"default":"%s"}}\n' "$USER" "$SHA_PNG" > "/tmp/${USER}.json"
+
+          # Модель скина: "default" (Steve, руки 4px) или "slim" (Alex, руки 3px).
+          # Ключ в textures профиля CustomSkinAPI — единственный признак модели
+          # для MCCustomSkinLoader: "default" -> classic, "slim" -> slim.
+          # modelType приходит в inputs.config от клиента ("alex" -> slim).
+          MODEL="default"
+          if [ -n "$SKIN_CONFIG" ]; then
+            MODEL="$(printf '%s' "$SKIN_CONFIG" | python3 -c "import sys,json;print('slim' if json.load(sys.stdin).get('modelType','').lower()=='alex' else 'default')" 2>/dev/null || true)"
+            [ -z "$MODEL" ] && MODEL="default"
+          fi
+
+          if [ "$MODEL" = "slim" ]; then
+            # slim первым — клиенты с поддержкой обеих моделей выберут её;
+            # default дублирует тот же файл, чтобы загрузка по textures.default
+            # (редактор сайта и клиенты только с classic) продолжала работать.
+            printf '{"username":"%s","textures":{"slim":"%s","default":"%s"}}\n' "$USER" "$SHA_PNG" "$SHA_PNG" > "/tmp/${USER}.json"
+          else
+            printf '{"username":"%s","textures":{"default":"%s"}}\n' "$USER" "$SHA_PNG" > "/tmp/${USER}.json"
+          fi
           cp "/tmp/${USER}.json" "${USER}.json"
           cp "/tmp/${USER}.json" "$(printf '%s' "$USER" | tr 'A-Z' 'a-z').json"
 
