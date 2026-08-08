@@ -102,8 +102,6 @@ jobs:
           cp "/tmp/${USER}.json" "${USER}.json"
           cp "/tmp/${USER}.json" "$(printf '%s' "$USER" | tr 'A-Z' 'a-z').json"
 
-          echo "${SHA_PNG}" > /tmp/sha.txt
-
       - name: Write config sidecar (optional)
         if: ${{ inputs.config != '' }}
         run: |
@@ -131,10 +129,12 @@ jobs:
       - name: Purge jsDelivr cache
         if: always()
         run: |
-
-          SHA_PNG="$(cat /tmp/sha.txt 2>/dev/null || true)"
           LOWERCASE_USER="$(printf '%s' '${{ inputs.username }}' | tr 'A-Z' 'a-z')"
+          # ВАЖНО: формат {"path": [...]} — устаревший {"urls": [...]} jsDelivr отклоняет
+          # (422 "path" is required), поэтому раньше CDN-кэш профилей не очищался вообще.
+          # Чистим оба регистра профиля: мод и сайт пробуют точный ник и lowercase-фолбэк.
+          # Текстуру чистить не нужно: имя файла = sha256 контента, новый файл — новое имя.
           curl -s -X POST https://purge.jsdelivr.net/ \
             -H "Content-Type: application/json" \
-            -d "{\"urls\":[\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/${{ inputs.username }}.json\",\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/${LOWERCASE_USER}.json\",\"https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/textures/${SHA_PNG}\"]}" \
+            -d "{\"path\": [\"/gh/${{ github.repository }}@main/${{ inputs.username }}.json\",\"/gh/${{ github.repository }}@main/${LOWERCASE_USER}.json\"]}" \
             || echo "Purge не удался (не критично)"
